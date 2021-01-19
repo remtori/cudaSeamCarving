@@ -248,7 +248,7 @@ void hostRemoveSeam(const uint8_t* inPixels, int width, int height, const uint32
         for (int x = 0; x < width - 1; x++)
         {
             int xx = x;
-            if (xx == removeX)
+            if (x >= removeX)
                 xx++;
 
             for (int channel = 0; channel < 3; channel++)             
@@ -360,8 +360,8 @@ void hostSeamCarving(const uint8_t* inPixels, int width, int height, uint8_t* ou
 
     writeEnergyMap("energy_map.txt", energy_map, width, height);
 
-    hostHighlightSeam(inPixels, width, height, energy_map, outPixels);
-    writePnm(outPixels, 3, width, height, "highlight.pnm");
+    // hostHighlightSeam(inPixels, width, height, energy_map, outPixels);
+    // writePnm(outPixels, 3, width, height, "highlight.pnm");
 
     hostRemoveSeam(inPixels, width, height, energy_map, outPixels);
 
@@ -381,7 +381,7 @@ const uint8_t* seamCarving(
     GpuTimer timer;
     timer.Start();
 
-    uint8_t* outPixels = (uint8_t*) malloc(sizeof(uint8_t) * width * height);
+    uint8_t* outPixels = (uint8_t*) malloc(sizeof(uint8_t) * width * height * 3);
     if (backend == Backend::Host) 
     {        
         uint8_t* bufferPixels = (uint8_t*) malloc(sizeof(uint8_t) * width * height * 3);
