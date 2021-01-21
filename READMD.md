@@ -38,7 +38,7 @@ Optimizing Seam Carving using parallel programming in Cuda
 
 - Song song hóa edge detection (mỗi thread 1 pixel)
 
-- Song song tính energy map bằng cách tính từng dòng với double buffering (mỗi thread 1 cột)
+- Song song tính energy map bằng cách tính từng dòng
 
 ### Design
 
@@ -50,7 +50,7 @@ Optimizing Seam Carving using parallel programming in Cuda
 
 - Tối ưu hóa như (Option 1)
 
-- Song song hóa phần tìm và bỏ seam
+- Song song hóa bỏ seam
 
 ### Design
 
@@ -67,10 +67,6 @@ Optimizing Seam Carving using parallel programming in Cuda
 - Find Least Significant Seam (Host)
 
 - Find Least Significant Seam (Device)
-
-    + One of two way
-
-    + Two of two way
 
 ## References
 

@@ -133,15 +133,6 @@ void writeEnergyMap(const char* filename, const uint32_t* energyMap, int width, 
     fclose(f);
 }
 
-float computeError(uint8_t* a1, uint8_t* a2, int n)
-{
-    float err = 0;
-    for (int i = 0; i < n; i++)
-        err += abs((int)a1[i] - (int)a2[i]);
-    err /= n;
-    return err;
-}
-
 void printDeviceInfo()
 {
     cudaDeviceProp devProv;
@@ -166,26 +157,6 @@ char* concatStr(const char* s1, const char* s2)
     return result;
 }
 
-enum Backend {
-    Host = 1,
-    Kernel1 = 2,
-    Kernel2 = 4,
-};
-
-const char* strEnum(Backend backend)
-{
-    switch (backend) {
-    case Backend::Host:
-        return "host";
-    case Backend::Kernel1:
-        return "device kernel 1";
-    case Backend::Kernel2:
-        return "device kernel 1";
-    }
-
-    return "unknown";
-}
-
 //////////// Implementations ////////////
 #define FILTER_WIDTH 3
 
@@ -205,19 +176,6 @@ __constant__ int dc_xSobelFilter[FILTER_WIDTH * FILTER_WIDTH];
 __constant__ int dc_ySobelFilter[FILTER_WIDTH * FILTER_WIDTH];
 
 /// HOST ///
-void hostGrayscale(const uint8_t* inPixels, int width, int height, uint8_t* outPixels)
-{
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int i = y * width + x;
-            uint8_t r = inPixels[3 * i];
-            uint8_t g = inPixels[3 * i + 1];
-            uint8_t b = inPixels[3 * i + 2];
-            outPixels[i] = 0.299f * r + 0.587f * g + 0.114f * b;
-        }
-    }
-}
-
 void hostRemoveSeam(const uint8_t* inPixels, int width, int height, int channels, const uint32_t* energyMap, uint8_t* outPixels)
 {
     // Find first min energy point
@@ -284,71 +242,6 @@ void hostHighlightSeam(const uint8_t* inPixels, int width, int height, const uin
             }
         }
     }
-}
-
-void hostExtractSeam(const uint32_t* energyMap, int width, int height, uint32_t* outIndexes)
-{
-    int removeX = 0;
-    for (int i = 1; i < width; i++) {
-        if (energyMap[removeX] > energyMap[i])
-            removeX = i;
-    }
-
-    outIndexes[0] = removeX;
-    for (int y = 1; y < height; y++) {
-        int prevRX = removeX;
-        for (int off = -1; off <= 1; off++) {
-            int x = min(max(prevRX + off, 0), width - 1);
-            if (energyMap[removeX + y * width] > energyMap[x + y * width])
-                removeX = x;
-        }
-
-        outIndexes[y] = removeX;
-    }
-}
-
-void hostFindEnergyMap(const uint8_t* gsInPixels, int width, int height, uint32_t* energyMap)
-{
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int xEdge = 0;
-            int yEdge = 0;
-            for (int fY = 0; fY < FILTER_WIDTH; fY++) {
-                for (int fX = 0; fX < FILTER_WIDTH; fX++) {
-                    int xx = x + (fX - FILTER_WIDTH / 2);
-                    int yy = y + (fY - FILTER_WIDTH / 2);
-                    xx = min(max(xx, 0), width - 1);
-                    yy = min(max(yy, 0), height - 1);
-                    xEdge += gsInPixels[xx + yy * width] * xSobelFilter[fX + fY * FILTER_WIDTH];
-                    yEdge += gsInPixels[xx + yy * width] * ySobelFilter[fX + fY * FILTER_WIDTH];
-                }
-            }
-
-            xEdge = max(min(xEdge, 255), 0);
-            yEdge = max(min(yEdge, 255), 0);
-            energyMap[x + y * width] = xEdge + yEdge;
-        }
-    }
-
-#ifdef WRITE_LOG
-    writeEnergyMap("energy.txt", energyMap, width, height);
-#endif
-
-    for (int y = height - 2; y >= 0; y--) {
-        for (int x = 0; x < width; x++) {
-            int minE = INT_MAX;
-            for (int off = -1; off <= 1; off++) {
-                int xx = min(max(x + off, 0), width - 1);
-                minE = min(minE, energyMap[xx + (y + 1) * width]);
-            }
-
-            energyMap[x + y * width] += minE;
-        }
-    }
-
-#ifdef WRITE_LOG
-    writeEnergyMap("energy_map.txt", energyMap, width, height);
-#endif
 }
 
 /// DEVICE ///
@@ -450,33 +343,9 @@ __global__ void deviceFindEnergyMap(const uint32_t* inEnergy, int width, int hei
     }
 }
 
-__global__ void deviceRemoveSeam(const uint32_t* removeIndexes, const uint8_t* inPixels, int nChannel, int width, int height, uint8_t* outPixels)
-{
-    extern __shared__ uint32_t s_removedIdx;
-
-    int x = threadIdx.x + blockIdx.x * blockDim.x;
-    int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= width || y >= height)
-        return;
-
-    if (threadIdx.x == 0)
-        s_removedIdx = removeIndexes[y];
-
-    __syncthreads();
-
-    int xx = x;
-    if (x >= s_removedIdx)
-        xx++;
-
-    for (int i = 0; i < nChannel; i++)
-        outPixels[(x + y * width) * nChannel + i] = inPixels[(xx + y * width) * nChannel + i];
-}
-
 uint8_t* seamCarving(
     const uint8_t* inPixels,
     int width, int height,
-    Backend backend,
     int outputWidth,
     dim3 blockSize = dim3(1, 1))
 {
@@ -488,195 +357,114 @@ uint8_t* seamCarving(
     timer.Start();
 
     uint8_t* outPixels = (uint8_t*)malloc(width * height * 3);
-    if (backend == Backend::Host) {
-        uint8_t* gsInpPixels = (uint8_t*)malloc(gsPixelSize);
-        uint8_t* gsOutPixels = (uint8_t*)malloc(gsPixelSize);
-        uint8_t* bufferRGBPixels = (uint8_t*)malloc(rgbPixelSize);
-        uint32_t* energyMap = (uint32_t*)malloc(energySize);
+    uint8_t* gsInpPixels = (uint8_t*)malloc(gsPixelSize);
+    uint8_t* gsOutPixels = (uint8_t*)malloc(gsPixelSize);
+    uint8_t* bufferRGBPixels = (uint8_t*)malloc(rgbPixelSize);
+    uint32_t* energyMap = (uint32_t*)malloc(energySize);
 
-        memcpy(bufferRGBPixels, inPixels, rgbPixelSize);
+    memcpy(bufferRGBPixels, inPixels, rgbPixelSize);
 
-        hostGrayscale(inPixels, width, height, gsInpPixels);
+    uint8_t* d_gsInpPixels;
+    uint8_t* d_rgbInpPixels;
+    uint32_t* d_energy;
+    uint32_t* d_energyMap;
+
+    CHECK(cudaMalloc(&d_gsInpPixels, gsPixelSize));
+    CHECK(cudaMalloc(&d_rgbInpPixels, rgbPixelSize));
+    CHECK(cudaMalloc(&d_energy, energySize));
+    CHECK(cudaMalloc(&d_energyMap, energySize));
+
+    CHECK(cudaMemcpyToSymbol(dc_xSobelFilter, xSobelFilter, FILTER_WIDTH * FILTER_WIDTH * sizeof(int), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(dc_ySobelFilter, ySobelFilter, FILTER_WIDTH * FILTER_WIDTH * sizeof(int), 0, cudaMemcpyHostToDevice));
+
+    CHECK(cudaMemcpy(d_rgbInpPixels, inPixels, rgbPixelSize, cudaMemcpyHostToDevice));
+
+    dim3 gridSize((width - 1) / blockSize.x + 1, (height - 1) / blockSize.y + 1);
+    deviceGrayscale<<<gridSize, blockSize>>>(d_rgbInpPixels, width, height, d_gsInpPixels);
+    cudaDeviceSynchronize();
+    CHECK(cudaGetLastError());
+
+    CHECK(cudaMemcpy(gsInpPixels, d_gsInpPixels, gsPixelSize, cudaMemcpyDeviceToHost));
 
 #ifdef WRITE_LOG
-        writePnm(gsInpPixels, 1, width, height, "grey.pnm");
+    writePnm(gsInpPixels, 1, width, height, "grey_dev1.pnm");
 #endif
 
-        uint8_t* gsInp = gsInpPixels;
-        uint8_t* gsOut = gsOutPixels;
-        uint8_t* rgbInp = bufferRGBPixels;
-        uint8_t* rgbOut = outPixels;
+    uint8_t* gsInp = gsInpPixels;
+    uint8_t* gsOut = gsOutPixels;
+    uint8_t* rgbInp = bufferRGBPixels;
+    uint8_t* rgbOut = outPixels;
 
-        int carvedWidth = width - outputWidth;
-        for (int i = 0; i < carvedWidth; i++) {
-            hostFindEnergyMap(gsInp, width - i, height, energyMap);
+    int carvedWidth = width - outputWidth;
+    for (int i = 0; i < carvedWidth; i++) {
 
-#ifdef WRITE_LOG
-            hostHighlightSeam(rgbInp, width - i, height, energyMap, rgbOut);
-            writePnm(rgbOut, 3, width - i, height, "highlight.pnm");
-#endif
+        int eWidth = width - i;
 
-            hostRemoveSeam(gsInp, width - i, height, 1, energyMap, gsOut);
-            hostRemoveSeam(rgbInp, width - i, height, 3, energyMap, rgbOut);
-
-            if (i < carvedWidth - 1) {
-                uint8_t* temp = gsInp;
-                gsInp = gsOut;
-                gsOut = temp;
-
-                temp = rgbInp;
-                rgbInp = rgbOut;
-                rgbOut = temp;
-            }
-        }
-
-        outPixels = rgbOut;
-
-        free(gsInp);
-        free(gsOut);
-        free(rgbInp);
-        free(energyMap);
-    } else {
-        uint8_t* gsInpPixels = (uint8_t*)malloc(gsPixelSize);
-        uint8_t* gsOutPixels = (uint8_t*)malloc(gsPixelSize);
-        uint8_t* bufferRGBPixels = (uint8_t*)malloc(rgbPixelSize);
-        uint32_t* energyMap = (uint32_t*)malloc(energySize);
-        uint32_t* removeIndexes;
-
-        memcpy(bufferRGBPixels, inPixels, rgbPixelSize);
-
-        uint8_t* d_gsInpPixels;
-        uint8_t* d_rgbInpPixels;
-        uint32_t* d_energy;
-        uint32_t* d_energyMap;
-        uint32_t* d_removeIndexes;
-
-        CHECK(cudaMalloc(&d_gsInpPixels, gsPixelSize));
-        CHECK(cudaMalloc(&d_rgbInpPixels, rgbPixelSize));
-        CHECK(cudaMalloc(&d_energy, energySize));
-        CHECK(cudaMalloc(&d_energyMap, energySize));
-
-        CHECK(cudaMemcpyToSymbol(dc_xSobelFilter, xSobelFilter, FILTER_WIDTH * FILTER_WIDTH * sizeof(int), 0, cudaMemcpyHostToDevice));
-        CHECK(cudaMemcpyToSymbol(dc_ySobelFilter, ySobelFilter, FILTER_WIDTH * FILTER_WIDTH * sizeof(int), 0, cudaMemcpyHostToDevice));
-
-        if (backend == Backend::Kernel2) {
-            removeIndexes = (uint32_t*)malloc(height);
-            CHECK(cudaMalloc(&d_removeIndexes, height));
-        }
-
-        CHECK(cudaMemcpy(d_rgbInpPixels, inPixels, rgbPixelSize, cudaMemcpyHostToDevice));
-
-        dim3 gridSize((width - 1) / blockSize.x + 1, (height - 1) / blockSize.y + 1);
-        deviceGrayscale<<<gridSize, blockSize>>>(d_rgbInpPixels, width, height, d_gsInpPixels);
+        // Calculate energy: E = xSobel + ySobel
+        dim3 gridSize((eWidth - 1) / blockSize.x + 1, (height - 1) / blockSize.y + 1);
+        int sMemSize = (blockSize.x + FILTER_WIDTH - 1) * (blockSize.y + FILTER_WIDTH - 1) * sizeof(uint8_t);
+        deviceCalcEnergy<<<gridSize, blockSize, sMemSize>>>(d_gsInpPixels, eWidth, height, d_energy);
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
 
-        CHECK(cudaMemcpy(gsInpPixels, d_gsInpPixels, gsPixelSize, cudaMemcpyDeviceToHost));
-
 #ifdef WRITE_LOG
-        writePnm(gsInpPixels, 1, width, height, "grey_dev.pnm");
+        CHECK(cudaMemcpy(energyMap, d_energy, energySize, cudaMemcpyDeviceToHost));
+        writeEnergyMap("energy_dev1.txt", energyMap, eWidth, height);
 #endif
 
-        uint8_t* gsInp = gsInpPixels;
-        uint8_t* gsOut = gsOutPixels;
-        uint8_t* rgbInp = bufferRGBPixels;
-        uint8_t* rgbOut = outPixels;
+        // Find energy map line by line
+        int fmBlockSize = blockSize.x * blockSize.y;
+        int fmGridSize = (eWidth - 1) / fmBlockSize + 1;
+        int fmSMemSize = fmBlockSize * sizeof(uint32_t);
+        deviceFindEnergyMap<<<fmGridSize, fmBlockSize, fmSMemSize>>>(d_energy, eWidth, height, d_energyMap);
+        cudaDeviceSynchronize();
+        CHECK(cudaGetLastError());
 
-        int carvedWidth = width - outputWidth;
-        for (int i = 0; i < carvedWidth; i++) {
-
-            int eWidth = width - i;
-
-            // Calculate energy: E = xSobel + ySobel
-            dim3 gridSize((eWidth - 1) / blockSize.x + 1, (height - 1) / blockSize.y + 1);
-            int sMemSize = (blockSize.x + FILTER_WIDTH - 1) * (blockSize.y + FILTER_WIDTH - 1) * sizeof(uint8_t);
-            deviceCalcEnergy<<<gridSize, blockSize, sMemSize>>>(d_gsInpPixels, eWidth, height, d_energy);
-            cudaDeviceSynchronize();
-            CHECK(cudaGetLastError());
-
+        // Remove seam on host based on energy map
+        CHECK(cudaMemcpy(energyMap, d_energyMap, energySize, cudaMemcpyDeviceToHost));
 #ifdef WRITE_LOG
-            CHECK(cudaMemcpy(energyMap, d_energy, energySize, cudaMemcpyDeviceToHost));
-            writeEnergyMap("energy_dev.txt", energyMap, eWidth, height);
+        writeEnergyMap("energy_map_dev1.txt", energyMap, eWidth, height);
+        hostHighlightSeam(rgbInp, eWidth, height, energyMap, rgbOut);
+        writePnm(rgbOut, 3, eWidth, height, "highlight_dev1.pnm");
 #endif
+        hostRemoveSeam(gsInp, eWidth, height, 1, energyMap, gsOut);
+        hostRemoveSeam(rgbInp, eWidth, height, 3, energyMap, rgbOut);
 
-            // Find energy map line by line
-            int fmBlockSize = blockSize.x * blockSize.y;
-            int fmGridSize = (eWidth - 1) / fmBlockSize + 1;
-            int fmSMemSize = fmBlockSize * sizeof(uint32_t);
-            deviceFindEnergyMap<<<fmGridSize, fmBlockSize, fmSMemSize>>>(d_energy, eWidth, height, d_energyMap);
-            cudaDeviceSynchronize();
-            CHECK(cudaGetLastError());
+        if (i < carvedWidth - 1) {
+            uint8_t* temp = gsInp;
+            gsInp = gsOut;
+            gsOut = temp;
 
-            // Remove seam on host based on energy map
-            CHECK(cudaMemcpy(energyMap, d_energyMap, energySize, cudaMemcpyDeviceToHost));
-#ifdef WRITE_LOG
-            writeEnergyMap("energy_map_dev.txt", energyMap, eWidth, height);
-            hostHighlightSeam(rgbInp, eWidth, height, energyMap, rgbOut);
-            writePnm(rgbOut, 3, eWidth, height, "highlight_dev.pnm");
-#endif
-            if (backend == Backend::Kernel1) {
-                hostRemoveSeam(gsInp, eWidth, height, 1, energyMap, gsOut);
-                hostRemoveSeam(rgbInp, eWidth, height, 3, energyMap, rgbOut);
+            temp = rgbInp;
+            rgbInp = rgbOut;
+            rgbOut = temp;
 
-                if (i < carvedWidth - 1) {
-                    uint8_t* temp = gsInp;
-                    gsInp = gsOut;
-                    gsOut = temp;
-
-                    temp = rgbInp;
-                    rgbInp = rgbOut;
-                    rgbOut = temp;
-
-                    CHECK(cudaMemcpy(d_gsInpPixels, gsInp, gsPixelSize, cudaMemcpyHostToDevice));
-                }
-            } else {
-                hostExtractSeam(energyMap, eWidth, height, removeIndexes);
-                CHECK(cudaMemcpy(d_removeIndexes, removeIndexes, height * sizeof(uint32_t), cudaMemcpyHostToDevice));
-
-                int rmBlockSize = blockSize.x * blockSize.y;
-                int rmGridSize = (eWidth - 1) / rmBlockSize + 1;
-                int rmSMemSize = height * sizeof(uint32_t);
-
-                deviceRemoveSeam<<<rmGridSize, rmBlockSize, rmSMemSize>>>(d_removeIndexes, d_gsInpPixels, 1, eWidth, height, d_gsOutPixels);
-                cudaDeviceSynchronize();
-                CHECK(cudaGetLastError());
-
-                deviceRemoveSeam<<<rmGridSize, rmBlockSize, rmSMemSize>>>(d_removeIndexes, d_rgbInpPixels, 3, eWidth, height, d_rgbOutPixels);
-                cudaDeviceSynchronize();
-                CHECK(cudaGetLastError());
-            }
-        }
-
-        if (backend == Backend::Kernel1) {
-            outPixels = rgbOut;
-        }
-
-        free(gsInp);
-        free(gsOut);
-        free(rgbInp);
-        free(energyMap);
-
-        CHECK(cudaFree(d_gsInpPixels));
-        CHECK(cudaFree(d_rgbInpPixels));
-        CHECK(cudaFree(d_energy));
-        CHECK(cudaFree(d_energyMap));
-
-        if (backend == Backend::Kernel2) {
-            free(removeIndexes);
-            CHECK(cudaFree(d_removeIndexes));
+            CHECK(cudaMemcpy(d_gsInpPixels, gsInp, gsPixelSize, cudaMemcpyHostToDevice));
         }
     }
 
+    outPixels = rgbOut;
+
+    free(gsInp);
+    free(gsOut);
+    free(rgbInp);
+    free(energyMap);
+
+    CHECK(cudaFree(d_gsInpPixels));
+    CHECK(cudaFree(d_rgbInpPixels));
+    CHECK(cudaFree(d_energy));
+    CHECK(cudaFree(d_energyMap));
+
     timer.Stop();
     float time = timer.Elapsed();
-    printf("Processing time (use %s): %f ms\n\n", strEnum(backend), time);
+    printf("Processing time: %f ms\n\n", time);
 
     return outPixels;
 }
 
 int main(int argc, char** argv)
 {
-    printDeviceInfo();
+    // printDeviceInfo();
 
     char* inputFile;
     if (argc >= 2) {
@@ -694,13 +482,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    int operatingMode = Backend::Host | Backend::Kernel1 | Backend::Kernel2;
-    if (argc >= 4)
-        operatingMode = atoi(argv[3]);
-
     dim3 blockSize(32, 32);
-    if (argc >= 5) {
-        int v = atoi(argv[4]);
+    if (argc >= 4) {
+        int v = atoi(argv[3]);
         blockSize.x = v;
         blockSize.y = v;
     }
@@ -719,17 +503,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint8_t* hostOutPixels = seamCarving(inPixels, width, height, Backend::Host, outWidth, blockSize);
-    uint8_t* k1OutPixels = seamCarving(inPixels, width, height, Backend::Kernel1, outWidth, blockSize);
-
+    uint8_t* k1OutPixels = seamCarving(inPixels, width, height, outWidth, blockSize);
     char* outFileNameBase = strtok(inputFile, "."); // Get rid of extension
-    writePnm(hostOutPixels, 3, outWidth, height, concatStr(outFileNameBase, "_host.pnm"));
     writePnm(k1OutPixels, 3, outWidth, height, concatStr(outFileNameBase, "_device1.pnm"));
-
-    float err = computeError(hostOutPixels, k1OutPixels, outWidth * height * 3);
-    printf("Error: %f\n", err);
-
-    free(hostOutPixels);
     free(k1OutPixels);
 
     return 0;
