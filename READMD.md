@@ -22,23 +22,35 @@ Optimizing Seam Carving using parallel programming in Cuda
 
 - Chạy hàm kernel edge detection lên ảnh
 
-- Tìm seam ít quan trọng nhất dựa trên kết quả của edge detection
+- Tính energy map dựa vào kết quả của edge detection
+
+- Tìm seam ít quan trọng nhất
 
 - Bỏ seam đó ra và xuất ảnh
 
 ### Comments
 
-## Device Parallel (Kernel 1)
+## Device Parallel (Option 1)
 
 ### Analysis
+
+- Song song hóa grayscale (mỗi thread 1 pixel)
+
+- Song song hóa edge detection (mỗi thread 1 pixel)
+
+- Song song tính energy map bằng cách tính từng dòng với double buffering (mỗi thread 1 cột)
 
 ### Design
 
 ### Comments
 
-## Device Parallel (Kernel 2)
+## Device Parallel (Option 2)
 
 ### Analysis
+
+- Tối ưu hóa như (Option 1)
+
+- Song song hóa phần tìm và bỏ seam
 
 ### Design
 
