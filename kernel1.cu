@@ -420,7 +420,6 @@ uint8_t* seamCarving(
         cudaDeviceSynchronize();
         CHECK(cudaGetLastError());
 
-        // Remove seam on host based on energy map
         CHECK(cudaMemcpy(energyMap, d_energyMap, energySize, cudaMemcpyDeviceToHost));
 #ifdef WRITE_LOG
         writeEnergyMap("energy_map_dev1.txt", energyMap, eWidth, height);
